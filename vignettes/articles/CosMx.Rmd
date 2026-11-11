@@ -212,6 +212,11 @@ query@colData %>% ggplot(aes(y = PhiClust, x = divergence)) +
 
 # Multi-sample analysis
 
+For joint niche discovery across eight tissue sections using the historical
+five-reference workshop scores, see the separate
+[multi-sample CosMx tutorial](CosMxMultiSample.html). The analysis below uses
+the four-reference scores and supplied spatial domains of this case study.
+
 After focusing on a particular lung cancer sample, now we use PhiSpace to do a multi-sample analysis, using all lung cancer samples in the CosMx dataset.
 
 Load all query lung samples (`data/CosMx_lung/` in the shared folder). Also load the precomputed PhiSpace annotation results (`output/CosMxAllLungsPhiRes4Refs.qs2`) to save RAM.

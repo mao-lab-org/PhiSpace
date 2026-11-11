@@ -251,6 +251,10 @@ result_metrics$StoredModels <- function(output_dir) {
   m
 }
 
+result_metrics$CosMxMultiSample <- function(output_dir) {
+  qs2::qs_read(file.path(output_dir, "CosMxMultiSample-summary.qs2"), validate_checksum = TRUE)
+}
+
 format_metrics <- function(metrics) {
   vapply(metrics, function(x) {
     if (length(x) != 1) stop("Each result metric must be a single value.")

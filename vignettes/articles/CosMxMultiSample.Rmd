@@ -1,0 +1,425 @@
+---
+title: "CosMx: comparing cell states and niches across tissue sections"
+author: "Jiadong Mao and Yifan Qin"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{CosMx: comparing cell states and niches across tissue sections}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(error = FALSE, fig.width = 8, fig.height = 6)
+```
+
+# Overview
+
+This tutorial compares continuous cell states across eight CosMx non-small cell
+lung cancer tissue sections from [He et al. (2022)](https://doi.org/10.1038/s41587-022-01483-z).
+We characterise tumour signatures, identify niches jointly across sections, and
+compare correlations between cell state scores within those niches.
+
+The analysis is adapted from the
+[2025 spatial analysis workshop](https://github.com/bhuvad/CosMxSpatialAnalysisWorkshop/blob/49debcb8f7426825d4f2b0f193d7647199071f80/vignettes/Part_II_PhiSpace.Rmd)
+by Jiadong Mao and Yifan Qin, preserved at tag `mig2025` (commit `49debcb8`).
+It uses the workshop's 50% subsample: **350,228 segmented cells and 81 scores**
+from five references. Four references cover immune, epithelial, endothelial
+and mesenchymal lineages in lung fibrosis
+([Natri et al., 2024](https://doi.org/10.1038/s41588-024-01702-0)); the fifth is
+the lung cancer atlas of
+[Salcher et al. (2022)](https://doi.org/10.1016/j.ccell.2022.10.008).
+
+These are different inputs from the [four-reference CosMx case study](CosMx.html).
+The supplied objects contain coordinates, metadata and precomputed PhiSpace
+scores, with a placeholder expression assay. We retain the saved niche
+memberships for the workshop example, recompute signatures and correlation
+analyses, and compare a fresh joint clustering with the saved partition.
+We cannot retrain the annotation from these objects.
+For training and applying models, see [Stored PhiSpace models](StoredModels.html).
+
+# Prepare the data
+
+From a checkout of the PhiSpace repository, run
+`Rscript --vanilla scripts/prepare-cosmx-multisample.R`. This downloads four
+historical files from the pinned commit, verifies their SHA-256 checksums, and
+converts them to `qs2`, checking that each restored object is identical.
+The current workshop package is not needed. Set
+`PHISPACE_COSMX_MULTISAMPLE_DATA` to the prepared folder when running this
+article directly; its default is `Test/cosmx-multisample-inputs`.
+
+```{r packages, message=FALSE}
+library(PhiSpace)
+library(SpatialExperiment)
+library(ggplot2)
+library(qs2)
+library(vizOmics)
+
+dat_dir <- Sys.getenv("PHISPACE_COSMX_MULTISAMPLE_DATA",
+                      "Test/cosmx-multisample-inputs")
+allTissues <- qs_read(file.path(dat_dir, "allTissues.qs2"), validate_checksum = TRUE)
+historical <- qs_read(file.path(dat_dir, "historical-clusters.qs2"),
+                      validate_checksum = TRUE)
+out_dir <- file.path(dat_dir, "output")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+tissueNames <- c("Lung5_Rep1", "Lung5_Rep2", "Lung5_Rep3", "Lung6",
+                 "Lung9_Rep1", "Lung9_Rep2", "Lung12", "Lung13")
+stopifnot(identical(names(allTissues), tissueNames))
+cell_ids <- unlist(lapply(allTissues, colnames), use.names = FALSE)
+score_names <- colnames(reducedDim(allTissues[[1]], "PhiSpace"))
+stopifnot(length(cell_ids) == 350228L, !anyDuplicated(cell_ids),
+          length(score_names) == 81L,
+          identical(cell_ids, names(historical$clusters)))
+for (spe in allTissues) {
+  score <- reducedDim(spe, "PhiSpace")
+  stopifnot(identical(rownames(score), colnames(spe)),
+            identical(colnames(score), score_names), all(is.finite(score)))
+}
+knitr::kable(data.frame(section = tissueNames,
+                        cells = vapply(allTissues, ncol, integer(1))), row.names = FALSE)
+```
+
+Sections from the same lung are repeated measurements, rather than independent
+patients. Spatial smoothing below is performed separately within each section,
+so cells in different sections can never become neighbours.
+
+## Pathology annotations
+
+The `region` metadata contain the supplied pathology annotations. Missing
+annotations are shown in grey. Colours have the same meaning in every panel;
+each panel uses its own spatial extent.
+
+```{r pathology-maps, fig.width=10, fig.height=14, message=FALSE, fig.cap="Supplied pathology annotations across the eight sections."}
+region_names <- sort(unique(unlist(lapply(allTissues, function(spe) as.character(spe$region)))))
+region_cols <- setNames(RColorBrewer::brewer.pal(8, "Set2")[seq_along(region_names)], region_names)
+plots <- lapply(tissueNames, function(s) {
+  p <- VizSpatial(allTissues[[s]], colBy = "region", ptSize = 0.4,
+             legend.symb.size = 2, fsize = 10) +
+    scale_colour_manual(values = region_cols, limits = c(region_names, NA),
+                         drop = FALSE, na.value = "grey80") +
+    labs(title = s, colour = "Pathology") +
+    guides(colour = guide_legend(nrow = 2, byrow = TRUE,
+                                 override.aes = list(size = 2)))
+  # Draw keys for absent regions too, so every panel has the same legend.
+  p$layers[[1]]$show.legend <- TRUE
+  p
+})
+patchwork::wrap_plots(plots, ncol = 2, guides = "collect") &
+  theme(legend.position = "bottom")
+```
+
+# Tumour signatures
+
+We fit partial least squares discriminant analysis (PLS-DA) separately in each
+section, predicting pathology labels from the **unsmoothed** scores. As in the
+workshop, the number of components equals the number of observed regions.
+We rank states by their signed coefficient for `Tumour`. These coefficients
+describe an association with the supplied label, rather than cell proportions.
+Lung9_Rep2 has no labelled tumour region and is omitted from this comparison.
+
+```{r tumour-signatures}
+tumourNames <- setdiff(tissueNames, "Lung9_Rep2")
+tumourSig <- regCoef_list <- setNames(vector("list", length(tumourNames)), tumourNames)
+for (s in tumourNames) {
+  query <- allTissues[[s]]
+  query <- query[, !is.na(query$region)]
+  fit <- rankFeatures(query, "region", method = "PLSDA",
+                       ncomp = length(unique(query$region)))
+  regCoef_list[[s]] <- fit$importance_scores
+  tumourSig[[s]] <- selectFeat(fit$importance_scores, nfeat = 5,
+                               absVal = FALSE)$orderedFeatMat[, "Tumour"]
+}
+tumour_table <- do.call(cbind, tumourSig)[1:10, , drop = FALSE]
+```
+
+The largest positive coefficient is at the top of each column. Scroll
+horizontally to compare all seven sections.
+
+```{r tumour-table, results='asis', echo=FALSE}
+cat('<div class="table-responsive" style="overflow-x: auto;">',
+    as.character(knitr::kable(tumour_table, format = "html", row.names = FALSE,
+                              table.attr = 'style="white-space: nowrap;"')),
+    '</div>')
+```
+
+Compare the signatures of the three Lung5 sections with those from other lungs.
+A shared reference defines common score axes, but it does **not** guarantee
+the absence of batch effects or make sections from one patient independent.
+
+# Joint niche discovery
+
+We smooth each section's scores over 15 neighbours with a Gaussian kernel,
+concatenate sections in the declared order, and cluster the first 30 principal
+components into nine niches. We retain the workshop's seed, Lloyd algorithm,
+20 starts and 1,000-iteration limit. The scores are centred without scaling.
+
+```{r joint-clustering, message=FALSE}
+cluster_path <- file.path(out_dir, "joint-clusters.qs2")
+if (!file.exists(cluster_path)) {
+  smoothed <- lapply(allTissues, function(spe) {
+    spatialSmoother(spe, smoothReducedDim = TRUE, kernel = "gaussian",
+                     k = 15, include_self = TRUE, verbose = FALSE)
+  })
+  mat2clust <- do.call(rbind, lapply(smoothed, function(spe) {
+    reducedDim(spe, "PhiSpace_smoothed")
+  }))
+  multiClustRes <- clusterPhiSpace(
+    mat2clust, k = 9, ncomp = 30, iter.max = 1000, nstart = 20,
+    algorithm = "Lloyd", center = TRUE, scale = FALSE,
+    seed = 83904, return_pca = FALSE
+  )
+  # Cluster numbers are arbitrary. Match labels by maximum overlap with the
+  # saved workshop clustering, retaining the actual new memberships.
+  overlap <- table(multiClustRes$clusters, historical$clusters[cell_ids])
+  assignment <- clue::solve_LSAP(overlap, maximum = TRUE)
+  label_map <- setNames(colnames(overlap)[as.integer(assignment)], rownames(overlap))
+  joint_clusters <- setNames(unname(label_map[as.character(multiClustRes$clusters)]),
+                             names(multiClustRes$clusters))
+  # Adjusted Rand index compares memberships independently of cluster numbers.
+  choose2 <- function(x) x * (x - 1) / 2
+  a <- sum(choose2(rowSums(overlap)))
+  b <- sum(choose2(colSums(overlap)))
+  expected <- a * b / choose2(sum(overlap))
+  historical_ari <- (sum(choose2(overlap)) - expected) / ((a + b) / 2 - expected)
+  cluster_result <- list(
+    clusters = joint_clusters, historical_ari = historical_ari,
+    historical_agreement = mean(joint_clusters == as.character(historical$clusters[cell_ids])),
+    parameters = multiClustRes$parameters,
+    tot_withinss = multiClustRes$kmeans_result$tot.withinss
+  )
+  qs_save(cluster_result, cluster_path)
+  rm(smoothed, mat2clust, multiClustRes)
+  invisible(gc())
+} else {
+  cluster_result <- qs_read(cluster_path, validate_checksum = TRUE)
+}
+stopifnot(identical(names(cluster_result$clusters), cell_ids))
+knitr::kable(data.frame(
+  comparison = c("Adjusted Rand index", "Agreement after matching labels"),
+  value = c(cluster_result$historical_ari, cluster_result$historical_agreement)
+), digits = 4)
+```
+
+The table compares the current computation with the saved workshop result.
+The old PCA consumed random numbers before k-means; the current SVD does not.
+This changes the random starts even with the same seed. A controlled replay
+with the old random-number state recovers the saved partition exactly.
+Matching labels alone does not change memberships. To preserve the workshop's
+scientific example, the following maps, signatures and correlation analyses
+use the **saved workshop memberships**, rather than transferring its
+interpretations to a different partition. The fresh build still recomputes
+joint clustering and reports its agreement above. A joint niche has the same
+definition across sections, although its abundance and spatial arrangement can
+differ.
+
+```{r workshop-memberships}
+analysis_clusters <- setNames(as.character(historical$clusters), names(historical$clusters))
+for (s in tissueNames) {
+  allTissues[[s]]$multiSampClust <- factor(
+    analysis_clusters[colnames(allTissues[[s]])], levels = as.character(1:9)
+  )
+}
+```
+
+```{r niche-maps, fig.width=10, fig.height=14, message=FALSE, fig.cap="Saved workshop niche memberships, with the same colour for each niche across sections."}
+niche_cols <- setNames(RColorBrewer::brewer.pal(9, "Set1"), as.character(1:9))
+plots <- lapply(tissueNames, function(s) {
+  p <- VizSpatial(allTissues[[s]], colBy = "multiSampClust", ptSize = 0.4,
+             legend.symb.size = 2, fsize = 10) +
+    scale_colour_manual(values = niche_cols, limits = names(niche_cols), drop = FALSE) +
+    labs(title = s, colour = "Joint niche")
+  p$layers[[1]]$show.legend <- TRUE
+  p
+})
+patchwork::wrap_plots(plots, ncol = 2, guides = "collect") &
+  theme(legend.position = "bottom")
+```
+
+## Characterise the niches
+
+We summarise unsmoothed scores within each joint niche, selecting the five
+states with the highest median. The boxplots use all cells in the niche.
+To keep memory bounded, we calculate summaries before plotting rather than
+reshaping all 28 million score entries into a long table. Whiskers extend to
+the most extreme observations within 1.5 interquartile ranges; outliers are
+omitted from the display.
+
+```{r niche-signatures, fig.width=10, fig.height=14, fig.cap="The five states with the highest median unsmoothed score in each workshop niche."}
+scores <- do.call(rbind, lapply(allTissues, function(spe) reducedDim(spe, "PhiSpace")))
+joint <- analysis_clusters[rownames(scores)]
+median_scores <- t(vapply(as.character(1:9), function(k) {
+  apply(scores[joint == k, , drop = FALSE], 2, median)
+}, numeric(ncol(scores))))
+colnames(median_scores) <- score_names
+rownames(median_scores) <- as.character(1:9)
+box_data <- do.call(rbind, lapply(rownames(median_scores), function(k) {
+  top <- names(sort(median_scores[k, ], decreasing = TRUE))[1:5]
+  do.call(rbind, lapply(top, function(ct) {
+    z <- scores[joint == k, ct]
+    q <- quantile(z, c(0.25, 0.5, 0.75))
+    iqr <- q[3] - q[1]
+    data.frame(niche = k, state = ct, median = q[2], lower = q[1], upper = q[3],
+               ymin = min(z[z >= q[1] - 1.5 * iqr]),
+               ymax = max(z[z <= q[3] + 1.5 * iqr]))
+  }))
+}))
+box_data$key <- factor(paste(box_data$niche, box_data$state),
+                       levels = paste(box_data$niche, box_data$state)[order(box_data$niche, box_data$median)])
+ggplot(box_data, aes(x = key, fill = median, ymin = ymin, lower = lower,
+                     middle = median, upper = upper, ymax = ymax)) +
+  geom_boxplot(stat = "identity") + coord_flip() +
+  facet_wrap(~ niche, ncol = 2, scales = "free_y") +
+  scale_x_discrete(labels = function(x) sub("^[0-9]+ ", "", x)) +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red") +
+  theme_bw(base_size = 10) + labs(x = NULL, y = "PhiSpace score", fill = "Median")
+```
+
+We also compare the joint niches with the supplied pathology labels. This
+provides a check on the interpretation of each niche, rather than relying on
+its numeric label. The old chapter called niches 1, 3 and 6 cancer niches,
+but that grouping does not agree with the supplied pathology annotations.
+
+```{r niche-pathology}
+pathology_table <- table(
+  niche = joint,
+  pathology = unlist(lapply(allTissues, function(spe) as.character(spe$region)), use.names = FALSE)
+)
+knitr::kable(data.frame(niche = rownames(pathology_table),
+                        as.data.frame.matrix(round(prop.table(pathology_table, 1), 3)),
+                        check.names = FALSE),
+              row.names = FALSE)
+```
+
+# Cell state co-presence
+
+Here, **co-presence** means Pearson correlation between unsmoothed PhiSpace
+scores across cells within a niche and section. It can reflect shared
+transcriptional programmes, mixtures of identities or measurement effects.
+It does not establish physical contact, communication or a causal interaction
+between cell types. For each section–niche combination with at least 50 cells,
+we calculate an 81 by 81 correlation matrix and vectorise its lower triangle.
+
+```{r co-presence}
+minNicheCells <- 50L
+corMat_list <- list()
+cor_metadata <- list()
+for (s in tissueNames) {
+  query <- allTissues[[s]]
+  sc <- reducedDim(query, "PhiSpace")
+  for (k in unique(as.character(query$multiSampClust))) {
+    keep <- query$multiSampClust == k
+    if (sum(keep) < minNicheCells) next
+    key <- paste(k, s, sep = "_")
+    corMat_list[[key]] <- cor(sc[keep, , drop = FALSE])
+    cor_metadata[[key]] <- data.frame(niche = k, sample = s, cells = sum(keep))
+  }
+}
+cor_metadata <- do.call(rbind, cor_metadata)
+pair_names <- outer(score_names, score_names, function(x, y) paste0(x, "<->", y))
+corMatVec <- t(vapply(corMat_list, function(x) x[lower.tri(x)],
+                      numeric(choose(length(score_names), 2))))
+colnames(corMatVec) <- pair_names[lower.tri(pair_names)]
+stopifnot(all(is.finite(corMatVec)), identical(rownames(corMatVec), rownames(cor_metadata)))
+dim(corMatVec)
+```
+
+As an example, we show one tumour-associated niche in Lung5_Rep1, selecting
+25 score columns with the highest variance across its correlation matrix.
+This is a display selection; all 3,240 pairs enter the subsequent analyses.
+
+```{r example-correlation, fig.width=9, fig.height=9}
+example_cor <- corMat_list[["1_Lung5_Rep1"]]
+selected <- names(sort(apply(example_cor, 2, var), decreasing = TRUE))[1:25]
+plotCorrelation(example_cor[selected, selected], seriation_method = "PCA")
+```
+
+## Compare correlation patterns by PCA
+
+Each point below represents a section–niche correlation matrix. We retain
+five PCs and display the first two. Similar scores indicate similar
+correlation patterns, which need not imply similar mean state scores.
+
+```{r correlation-pca}
+set.seed(12361)
+pca_res <- getPC(corMatVec, ncomp = 5)
+pca_plot <- data.frame(pca_res$scores, cor_metadata)
+ggplot(pca_plot, aes(comp1, comp2, colour = niche, label = sample)) +
+  geom_text(size = 2.8, check_overlap = FALSE) +
+  scale_colour_manual(values = niche_cols) + theme_bw() +
+  labs(x = "PC1", y = "PC2", colour = "Joint niche")
+plotLoadings(pca_res$loadings, "comp1", showNeg = FALSE, absVal = TRUE, nfeat = 10)
+plotLoadings(pca_res$loadings, "comp2", showNeg = FALSE, absVal = TRUE, nfeat = 10)
+```
+
+## Exploratory discriminant analysis
+
+We use distance-weighted discrimination (DWD) to contrast niches in which
+more than half the **pathology-labelled cells** are labelled `Tumour` with
+the remaining niches. This explicit, illustrative threshold replaces the
+old chapter's inconsistent hard-coded niche numbers. Cells without pathology
+labels do not enter the denominator. DWD produces a fitted score and a weight
+for each pair of cell states.
+
+```{r dwd}
+tumour_fraction <- prop.table(pathology_table, 1)[, "Tumour"]
+tumour_niches <- names(tumour_fraction)[tumour_fraction > 0.5]
+tumour_niches
+nicheBinary <- ifelse(cor_metadata$niche %in% tumour_niches, 1, -1)
+dwd_res <- rankFeatures(corMatVec, response = nicheBinary,
+                        method = "DWD", seed = 12361)
+dwd_plot <- data.frame(dwd_res$scores,
+                       group = ifelse(nicheBinary == 1, "Tumour-majority niches", "Other niches"))
+ggplot(dwd_plot, aes(DWD_score, fill = group)) +
+  geom_density(alpha = 0.4) + theme_bw() +
+  labs(x = "Fitted DWD score", fill = NULL)
+plotLoadings(dwd_res$importance_scores, "DWD_weight", nfeat = 20)
+```
+
+These are fitted, exploratory contrasts. The display does not measure
+prediction on independent patients, and the internal cross-validation used
+to choose regularisation does not account for repeated sections from one
+lung. Clinical or predictive claims would require validation that holds out
+entire patients.
+
+```{r save-validation, include=FALSE}
+metrics <- list(
+  n_sections = length(allTissues), n_cells = length(cell_ids), n_states = length(score_names),
+  cells_sha256 = digest::digest(cell_ids, algo = "sha256"),
+  states_sha256 = digest::digest(score_names, algo = "sha256"),
+  tumour_table_sha256 = digest::digest(tumour_table, algo = "sha256"),
+  dwd_tumour_niches = paste(tumour_niches, collapse = ","),
+  historical_ari = cluster_result$historical_ari,
+  historical_agreement = cluster_result$historical_agreement,
+  recomputed_tot_withinss = cluster_result$tot_withinss,
+  n_cor_matrices = nrow(corMatVec), n_cor_pairs = ncol(corMatVec),
+  cor_mean = mean(corMatVec), cor_sd = sd(as.vector(corMatVec)),
+  cor_abs_sum = sum(abs(corMatVec)),
+  pca_score_ss = sum(pca_res$scores^2),
+  dwd_score_mean = mean(dwd_res$scores[, "DWD_score"]),
+  dwd_score_sd = sd(dwd_res$scores[, "DWD_score"]),
+  dwd_weight_abs_sum = sum(abs(dwd_res$importance_scores))
+)
+for (s in tissueNames) metrics[[paste0(s, "_n_cells")]] <- ncol(allTissues[[s]])
+for (k in as.character(1:9)) {
+  metrics[[paste0("niche_", k, "_size")]] <- sum(joint == k)
+  metrics[[paste0("niche_", k, "_tumour_fraction")]] <- prop.table(pathology_table, 1)[k, "Tumour"]
+}
+qs_save(metrics, file.path(out_dir, "CosMxMultiSample-summary.qs2"))
+```
+
+# Provenance and further reading
+
+The tutorial retains the workshop's supplied scores and subsampling, while
+updating compatibility with current PhiSpace APIs. Source and input hashes,
+the fresh/cached build procedure and numerical comparisons are recorded in
+the repository's `scripts/cosmx-multisample-validation.md`. No expression
+normalisation or reference fitting is performed by this tutorial.
+
+For the scientific method and broader spatial analyses, see
+[Mao, Choi and Lê Cao (2026)](https://doi.org/10.1016/j.crmeth.2026.101483).
+The original workshop is distributed under GPL-3.0; its authorship and source
+are retained above.
+
+```{r session-info}
+sessionInfo()
+```

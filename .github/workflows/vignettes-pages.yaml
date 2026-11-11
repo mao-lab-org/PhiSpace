@@ -45,6 +45,7 @@ jobs:
             any::RColorBrewer
             any::zeallot
             any::plotly
+            any::patchwork
             any::seriation
             any::ggdendro
             github::ByronSyun/vizOmics
@@ -83,6 +84,11 @@ jobs:
         with:
           path: Test/cosmx-inputs
           key: cosmx-inputs-${{ hashFiles('scripts/cosmx-inputs.tsv') }}
+      - name: Cache verified multi-sample CosMx workshop inputs
+        uses: actions/cache@v5
+        with:
+          path: Test/cosmx-multisample-inputs
+          key: cosmx-multisample-inputs-${{ hashFiles('scripts/cosmx-multisample-inputs.tsv', 'scripts/prepare-cosmx-multisample.R') }}
       - name: Build Stereo-seq with fresh results
         run: Rscript --vanilla scripts/build-stereoseq.R
       - name: Build Visium with fresh results
@@ -97,6 +103,8 @@ jobs:
         run: Rscript --vanilla scripts/build-perturbseq.R
       - name: Build CosMx with fresh results
         run: Rscript --vanilla scripts/build-cosmx.R
+      - name: Build multi-sample CosMx from workshop scores
+        run: Rscript --vanilla scripts/build-cosmx-multisample.R
       - name: Build Stored models with fresh results
         run: Rscript --vanilla scripts/build-stored-models.R
       - name: Build the package vignettes
