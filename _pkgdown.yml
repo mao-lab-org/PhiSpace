@@ -29,6 +29,7 @@ articles:
     contents:
       - articles/Visium
       - articles/CosMx
+      - articles/CosMxMultiSample
       - articles/StereoSeq
   - title: "Stored PhiSpace models"
     desc: "Training a model once and applying it to new queries without the reference."

@@ -58,6 +58,7 @@ Rscript --vanilla scripts/build-getting-started.R
 Rscript --vanilla scripts/build-cite-seq.R
 Rscript --vanilla scripts/build-perturbseq.R
 Rscript --vanilla scripts/build-cosmx.R
+Rscript --vanilla scripts/build-cosmx-multisample.R
 Rscript --vanilla scripts/build-stored-models.R
 Rscript --vanilla scripts/build-package-vignettes.R
 Rscript --vanilla scripts/build-reference.R
@@ -95,6 +96,7 @@ Rscript --vanilla scripts/build-getting-started.R
 Rscript --vanilla scripts/build-cite-seq.R
 Rscript --vanilla scripts/build-perturbseq.R
 Rscript --vanilla scripts/build-cosmx.R
+Rscript --vanilla scripts/build-cosmx-multisample.R
 Rscript --vanilla scripts/build-stored-models.R
 Rscript --vanilla scripts/build-package-vignettes.R
 Rscript --vanilla scripts/build-reference.R
@@ -140,6 +142,41 @@ contains only the Visium article.
 If upstream inputs change, checksum verification fails. Review those changes
 before updating the relevant `scripts/*-inputs.tsv`; changing a manifest also
 changes the Actions data-cache key. Computed analysis outputs are never cached.
+
+## Multi-sample CosMx workshop article
+
+`CosMxMultiSample` is a separate website article in `vignettes/articles/`.
+Its inputs are pinned to workshop commit
+`49debcb8f7426825d4f2b0f193d7647199071f80` (`mig2025`), not the current
+workshop package. `scripts/prepare-cosmx-multisample.R` downloads only the four
+manifest-listed RDA files (about 235 MB), verifies SHA-256, and converts them
+to checksum-validated qs2 with an identical-object round trip. A conversion
+record checks both source-manifest and derived-file hashes on later runs.
+Actions caches these verified inputs and conversions, never the newly
+computed clustering. No new Dropbox upload is required.
+
+`scripts/build-cosmx-multisample.R` defaults to `fresh`: it recomputes spatial
+smoothing, joint clustering and its comparison with the saved workshop
+partition. Both modes use the saved workshop memberships for the downstream
+scientific example, and recompute signatures, correlations, PCA and DWD.
+The objects contain precomputed five-reference scores, not expression data;
+this is not a fresh reference fit. See
+`scripts/cosmx-multisample-validation.md` for the compatibility decisions.
+
+- `PHISPACE_COSMX_MULTISAMPLE_INPUTS`: raw and converted input cache.
+- `PHISPACE_COSMX_MULTISAMPLE_DATA`: prepared data folder for a direct render.
+- `PHISPACE_COSMX_MULTISAMPLE_RUN_DIR`: a new, empty analysis-directory path;
+  the build creates it. Use this to retain fresh results for a cached check.
+- `PHISPACE_COSMX_MULTISAMPLE_MODE`: `fresh` (default) or `cached`.
+- `PHISPACE_COSMX_MULTISAMPLE_RESULTS`: required in cached mode; points to a
+  fresh build's `output/`, containing `joint-clusters.qs2` and
+  `joint-clusters.sha256`. The hash is checked before staging, and the build
+  fails if the result is rewritten. Downstream computations still run.
+
+For local work, put these caches, analysis directories and staged sites
+outside the repository. Run `scripts/validate-cosmx-multisample.R` separately
+to repeat the historical PCA/random-state comparison; it is not required by
+the publishing workflow.
 
 ## Check deployment
 

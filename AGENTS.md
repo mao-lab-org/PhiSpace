@@ -19,7 +19,7 @@ PhiSpace/
 ├── R/                      # R source files
 ├── man/                    # roxygen2-generated documentation
 ├── vignettes/              # 2 package vignettes (PhiSpace, PhiSpaceST) on Bioconductor data
-├── vignettes/articles/     # 8 website articles (Rmd), not in the package build
+├── vignettes/articles/     # 9 website articles (Rmd), not in the package build
 ├── tests/                  # testthat tests
 ├── inst/CITATION
 ├── pkgdown/favicon/        # website favicons
@@ -102,6 +102,7 @@ working explicit vignette is the oracle for evaluating a wrapper.
 | done | `CITE-seq.Rmd` | Compatibility-complete; automated from cached results; live | Private paths; fresh RNA branch saved the wrong object name; fresh build needs about 65 GB RAM |
 | done | `CosMx.Rmd` | Compatibility-complete; automated and live | qs2 migration in the existing Dropbox folder; five download links replaced by one folder link |
 | new | `StoredModels.Rmd` | Added 2026-10-12 (MODEL-PLAN step 6); automated, fresh | Uses the CosMx inputs; trains `trainPhiSpace()` models and compares them with the per-query fit |
+| new | `CosMxMultiSample.Rmd` | Added 2026-11-11; local fresh/cached builds pass; CI/live pending push | Historical five-reference workshop scores; preserves saved niches and diagnoses changed PCA random-state consumption |
 
 The order may change for scientific priority, but `getting_started` should
 normally be next because it exercises the public `PhiSpace()` interface and
@@ -109,7 +110,14 @@ parameter tuning. Complete and publish one vignette-sized change at a time.
 
 ### Pending User Actions (TODO)
 
-None. The user pushes each commit; after a push, check both workflows
+`CosMxMultiSample` is ready for review and a user push. The active workflow
+includes it, but Actions and the live page have not yet been checked. See
+`scripts/cosmx-multisample-validation.md`: 45 checks and nine identical figures
+in fresh/cached builds; the DWD target is corrected from stale hard-coded
+niche numbers to an explicit pathology-majority criterion. The new inputs
+come from the pinned workshop commit, so no Dropbox upload is needed.
+
+The user pushes each commit; after a push, check both workflows
 (**Build and publish vignettes** and **R CMD check**) and the live pages. A new
 push cancels the running build of the older commit; only the newest deploys.
 
